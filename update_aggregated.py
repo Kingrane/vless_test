@@ -5,18 +5,14 @@ from urllib.parse import unquote
 
 # --- НАСТРОЙКИ ---
 
-# 1. Источники
-URL_ELITE = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-checked.txt"
-URL_COMMON = "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt"
+# Ссылки
+URL_WHITE_CHECKED = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-checked.txt"
+URL_VLESS_LITE = "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt"
 
-# 2. Лимиты для Elite файла (best_ru_de.txt)
-LIMIT_VK_ANYCAST = 10  # Сколько берем "самых живых" (VK/Anycast)
-LIMIT_RU_SIMPLE = 25   # Сколько берем обычной России
-LIMIT_DE = 15          # Сколько берем Германии
-TOTAL_ELITE_LIMIT = LIMIT_VK_ANYCAST + LIMIT_RU_SIMPLE + LIMIT_DE
-
-# Лимит для Common файла (aggregated.txt)
-LIMIT_COMMON = 50
+# Лимиты
+LIMIT_RU = 35
+LIMIT_OTHER = 15
+TOTAL_LIMIT = LIMIT_RU + LIMIT_OTHER
 
 def fetch_text(url: str) -> str:
     req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -24,33 +20,29 @@ def fetch_text(url: str) -> str:
         with urlopen(req, timeout=20) as resp:
             return resp.read().decode("utf-8", errors="ignore")
     except Exception as e:
-        print(f"Error fetching {url}: {e}")
+        print(f"Ошибка загрузки {url}: {e}")
         return ""
 
-def get_score(line: str) -> int:
-    """Оценка качества: VK/Anycast получают +100 очков."""
+def get_country(line: str) -> str:
+    """
+    Честно ищет страну в названии.
+    Возвращает 'ru', 'de', или 'other'.
+    """
     try:
-        remark = unquote(line.split("#")[-1]).lower()
-        if any(x in remark for x in ["vk", "yandex", "anycast"]):
-            return 100
-        return 0
-    except:
-        return -100
-
-def detect_country(line: str) -> str:
-    """Определяет страну по флагу или тексту."""
-    try:
+        # Берем текст после решетки (#)
         if "#" not in line: return "other"
         remark = unquote(line.split("#")[-1]).lower()
-        
-        # РФ
-        if "🇷🇺" in remark or "russia" in remark or "ru_" in remark or "rf" in remark:
+
+        # Проверяем РФ
+        # Ищем: russia, ru_, rf, или флаг 🇷🇺
+        if "russia" in remark or "ru_" in remark or "rf" in remark or "🇷🇺" in remark:
             return "ru"
-        
-        # Германия
-        if "🇩🇪" in remark or "germany" in remark or "de_" in remark or "frankfurt" in remark:
+
+        # Проверяем Германию
+        # Ищем: germany, de_, frankfurt, или флаг 🇩🇪
+        if "germany" in remark or "de_" in remark or "frankfurt" in remark or "🇩🇪" in remark:
             return "de"
-            
+
         return "other"
     except:
         return "other"
@@ -63,80 +55,89 @@ def save_file(filename_base, content_list):
         f.write(base64.b64encode(plain.encode("utf-8")).decode("utf-8"))
 
 def main():
-    print("=== Запуск Аккуратного Сборщика ===")
-    
-    # ==========================================
-    # ФАЙЛ 1: best_ru_de.txt (ЭЛИТА)
-    # ==========================================
-    print("\n[1] Генерация best_ru_de.txt (Элита)")
-    text_elite = fetch_text(URL_ELITE)
-    lines_elite = [l.strip() for l in text_elite.splitlines() if l.strip().startswith("vless://")]
+    print("=== Запуск Честного Сборщика v3 ===")
 
-    # Классификация
-    pool_vk_anycast = []
-    pool_ru_simple = []
+    # --- ШАГ 1: ЗАГРУЗКА ВСЕХ ИСТОЧНИКОВ ---
+    
+    # Загружаем первый источник (White Checked)
+    text1 = fetch_text(URL_WHITE_CHECKED)
+    lines1 = [l.strip() for l in text1.splitlines() if l.strip().startswith("vless://")]
+    
+    # Загружаем второй источник (Vless Lite)
+    text2 = fetch_text(URL_VLESS_LITE)
+    lines2 = [l.strip() for l in text2.splitlines() if l.strip().startswith("vless://")]
+
+    # ==========================================
+    # ФАЙЛ 1: best_ru_de.txt (СТРОГО WHITE CHECKED)
+    # ==========================================
+    print("\n[1] Сборка best_ru_de.txt (строго RU + DE из White Checked)")
+    
+    pool_ru = []
     pool_de = []
 
-    for line in lines_elite:
-        country = detect_country(line)
-        score = get_score(line)
-        
-        # Сначала разбираем элиту (VK/Anycast), считаем их РФ
-        if score == 100:
-            pool_vk_anycast.append(line)
-        elif country == "ru":
-            pool_ru_simple.append(line)
+    # Разбираем только первый источник
+    for line in lines1:
+        country = get_country(line)
+        if country == "ru":
+            pool_ru.append(line)
         elif country == "de":
             pool_de.append(line)
+    
+    # Убираем дубликаты
+    pool_ru = list(dict.fromkeys(pool_ru))
+    pool_de = list(dict.fromkeys(pool_de))
+    
+    print(f"Найдено в White Checked: РФ={len(pool_ru)}, DE={len(pool_de)}")
 
-    # Сортировка и отбор
-    # VK/Anycast сортируем по принципу "как есть", просто берем сколько нужно
-    # Если их меньше лимита - возьмем всех
-    random.shuffle(pool_vk_anycast)
-    selected_vk = pool_vk_anycast[:LIMIT_VK_ANYCAST]
-
-    # Обычная РФ
-    random.shuffle(pool_ru_simple)
-    selected_ru = pool_ru_simple[:LIMIT_RU_SIMPLE]
-
-    # Германия
+    # Берем 30 РФ и 20 DE
+    random.shuffle(pool_ru)
     random.shuffle(pool_de)
-    selected_de = pool_de[:LIMIT_DE]
-
-    # Сборка итога
-    final_elite = selected_vk + selected_ru + selected_de
     
-    # Если VK/Anycast было мало, добираем обычной РФ
-    if len(selected_vk) < LIMIT_VK_ANYCAST:
-        shortage = LIMIT_VK_ANYCAST - len(selected_vk)
-        # Берем дополнительно из pool_ru_simple, но те, которых еще нет в списке
-        extras = [x for x in pool_ru_simple if x not in final_elite][:shortage]
-        final_elite.extend(extras)
-
-    # Если DE мало, добирать не будем (строгость)
+    final_best = []
+    final_best.extend(pool_ru[:30])
+    final_best.extend(pool_de[:20])
+    random.shuffle(final_best)
     
-    random.shuffle(final_elite)
-    
-    # Если всего набралось меньше лимита (например, DE нет), предупреждаем
-    if len(final_elite) < TOTAL_ELITE_LIMIT:
-        print(f"Внимание! Набрано меньше лимита: {len(final_elite)} из {TOTAL_ELITE_LIMIT}")
-
-    save_file("best_ru_de", final_elite)
-    print(f"Готово: VK/Any:{len(selected_vk)}, RU:{len(selected_ru)}, DE:{len(selected_de)} | Всего: {len(final_elite)}")
+    save_file("best_ru_de", final_best)
+    print(f"Готово best_ru_de: {len(final_best)} серверов")
 
     # ==========================================
-    # ФАЙЛ 2: aggregated.txt (МАССОВКА)
+    # ФАЙЛ 2: aggregated.txt (МИКС ИЗ ВСЕХ)
     # ==========================================
-    print("\n[2] Генерация aggregated.txt (Массовка)")
-    text_common = fetch_text(URL_COMMON)
-    lines_common = [l.strip() for l in text_common.splitlines() if l.strip().startswith("vless://")]
+    print("\n[2] Сборка aggregated.txt (35 РФ + 15 Мир из всех источников)")
     
-    # Просто мешаем и берем 50 штук
-    random.shuffle(lines_common)
-    final_common = lines_common[:LIMIT_COMMON]
+    # Объединяем оба источника для большого списка
+    all_lines = lines1 + lines2
     
-    save_file("aggregated", final_common)
-    print(f"Готово: {len(final_common)} серверов из vless_lite.")
+    pool_ru_mix = []
+    pool_other_mix = []
+
+    for line in all_lines:
+        country = get_country(line)
+        if country == "ru":
+            pool_ru_mix.append(line)
+        else:
+            # Сюда попадут и DE, и OTHER (для разнообразия)
+            pool_other_mix.append(line)
+
+    # Убираем дубликаты
+    pool_ru_mix = list(dict.fromkeys(pool_ru_mix))
+    pool_other_mix = list(dict.fromkeys(pool_other_mix))
+    
+    print(f"Найдено в Миксе: РФ={len(pool_ru_mix)}, Других={len(pool_other_mix)}")
+
+    # Берем 35 РФ
+    random.shuffle(pool_ru_mix)
+    final_agg = pool_ru_mix[:LIMIT_RU]
+    
+    # Берем 15 Других
+    random.shuffle(pool_other_mix)
+    final_agg.extend(pool_other_mix[:LIMIT_OTHER])
+    
+    random.shuffle(final_agg)
+    
+    save_file("aggregated", final_agg)
+    print(f"Готово aggregated: {len(final_agg)} серверов")
 
 if __name__ == "__main__":
     main()

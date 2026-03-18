@@ -5,21 +5,18 @@ from urllib.request import urlopen, Request
 from urllib.parse import unquote
 
 # --- НАСТРОЙКИ ---
-# Источники расставлены по приоритету
-SOURCES = [
-    # 1. Самый качественный (белые списки,Checked). Дает ~58% живых.
+# Источники для ОСНОВНОЙ подписки (aggregated.txt)
+SOURCES_MAIN = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-checked.txt",
-    
-    # 2. Лайт версия (zieng2). Дает ~8% живых.
     "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt",
-    
-    # 3. API (для разнообразия)
-    "https://nowmeow.pw/8ybBd3fdCAQ6Ew5H0d66Y1hMbh63GpKUtEXQClIu/whitelist?ru=20&other=10"
+    "https://nowmeow.pw/8ybBd3fdCAQ6Ew5H0d66Y1hMbh63GpKUtEXQClIu/whitelist?ru=10&other=40"
 ]
 
-LIMIT_RU = 35       # Сколько хотим РФ серверов
-LIMIT_OTHER = 15    # Сколько хотим иностранных
-LIMIT_TOTAL = LIMIT_RU + LIMIT_OTHER
+# Источник для ЭЛИТНОЙ подписки (best_ru_de.txt)
+SOURCE_ELITE = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-checked.txt"
+
+LIMIT_RU = 30
+LIMIT_DE = 20
 
 def fetch_text(url: str) -> str:
     req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -31,90 +28,102 @@ def fetch_text(url: str) -> str:
         return ""
 
 def detect_country(line: str) -> str:
-    """
-    Пытается понять страну по комментарию в конце строки.
-    Обычно формат: vless://...#Country Name или vless://...#🇷🇺 Country
-    """
     try:
-        # Берем часть после решетки
-        if "#" not in line: return "unknown"
+        if "#" not in line: return "other"
         remark = line.split("#")[-1]
         remark = unquote(remark).lower()
 
-        # Список ключевых слов для РФ
-        ru_keys = ["russia", "ru_", "rf", "москва", "moscow", "🇷🇺"]
+        # РФ
+        if "🇷🇺" in remark or "russia" in remark or "ru_" in remark or "rf" in remark:
+            return "ru"
         
-        # Проверяем РФ
-        for key in ru_keys:
-            if key in remark:
-                return "ru"
-        
-        # Если это точно не РФ, считаем "other"
+        # Германия
+        if "🇩🇪" in remark or "germany" in remark or "de_" in remark or "frankfurt" in remark:
+            return "de"
+            
         return "other"
     except:
-        return "unknown"
+        return "other"
 
-def main():
-    print("--- Запуск гео-агрегатора ---")
-    
-    # Разделяем потоки
+def process_sources(url_list):
+    """Собирает все ключи из списка URL, сортирует по странам"""
     pool_ru = []
+    pool_de = []
     pool_other = []
     
-    # Скачиваем и сортируем
-    for url in SOURCES:
+    for url in url_list:
         text = fetch_text(url)
         lines = [l.strip() for l in text.splitlines() if l.strip().startswith("vless://")]
         
-        # Разделяем по странам
         for line in lines:
             country = detect_country(line)
             if country == "ru":
                 pool_ru.append(line)
+            elif country == "de":
+                pool_de.append(line)
             else:
                 pool_other.append(line)
+                
+    # Дедупликация
+    return list(dict.fromkeys(pool_ru)), list(dict.fromkeys(pool_de)), list(dict.fromkeys(pool_other))
 
-    # Удаляем дубликаты внутри списков
-    pool_ru = list(dict.fromkeys(pool_ru))
-    pool_other = list(dict.fromkeys(pool_other))
+def main():
+    print("=== Запуск генератора подписок ===")
     
-    print(f"Найдено в базах: РФ={len(pool_ru)}, Других={len(pool_other)}")
-
-    # --- ЛОГИКА ОТБОРА ---
-    final_list = []
-
-    # 1. Берем РФ. 
-    # Перемешиваем, чтобы каждый раз были разные, но из качественного пула.
-    random.shuffle(pool_ru)
+    # --- 1. ГЕНЕРАЦИЯ ОСНОВНОЙ ПОДПИСКИ (aggregated.txt) ---
+    # Логика: 35 РФ + 15 Мир (как мы обсуждали ранее, но теперь ищем RU/DE глобально)
+    print("\n[1/2] Генерация основной подписки...")
+    ru_main, de_main, other_main = process_sources(SOURCES_MAIN)
     
-    # Берем сколько просили (35)
-    final_list.extend(pool_ru[:LIMIT_RU])
+    final_main = []
+    random.shuffle(ru_main)
+    final_main.extend(ru_main[:35]) # Берем 35 РФ
     
-    # 2. Добираем иностранные (15)
-    random.shuffle(pool_other)
-    final_list.extend(pool_other[:LIMIT_OTHER])
-
-    # Если РФ не хватило, добиваем иностранцами до 50
-    if len(final_list) < LIMIT_TOTAL:
-        needed = LIMIT_TOTAL - len(final_list)
-        # Берем остатки из других, которых еще нет в списке
-        leftovers = [x for x in pool_other if x not in final_list]
-        final_list.extend(leftovers[:needed])
-
-    # Финальная перемешка (чтобы не шли блоком РФ, потом блоком Мир)
-    random.shuffle(final_list)
-
-    # --- СОХРАНЕНИЕ ---
-    plain_content = "\n".join(final_list)
-    base64_content = base64.b64encode(plain_content.encode("utf-8")).decode("utf-8")
-
+    # Добираем из Германии и прочих
+    rest_pool = de_main + other_main
+    random.shuffle(rest_pool)
+    final_main.extend(rest_pool[:15]) # Берем 15 "Мир"
+    
+    random.shuffle(final_main)
+    
+    # Сохраняем основную
     with open("aggregated.txt", "w", encoding="utf-8") as f:
-        f.write(plain_content)
-    
+        f.write("\n".join(final_main))
     with open("aggregated_base64.txt", "w", encoding="utf-8") as f:
-        f.write(base64_content)
+        f.write(base64.b64encode("\n".join(final_main).encode("utf-8")).decode("utf-8"))
+    print(f"Основная подписка готова: {len(final_main)} шт.")
+
+    # --- 2. ГЕНЕРАЦИЯ ЭЛИТНОЙ ПОДПИСКИ (best_ru_de.txt) ---
+    # Логика: Четко 30 РФ + 20 DE только из WHITE-CIDR-RU-checked
+    print("\n[2/2] Генерация элитной подписки (RU+DE)...")
+    ru_elite, de_elite, _ = process_sources([SOURCE_ELITE])
+    
+    print(f"Найдено в Elite источнике: РФ={len(ru_elite)}, DE={len(de_elite)}")
+    
+    final_elite = []
+    
+    # Берем 30 РФ
+    random.shuffle(ru_elite)
+    final_elite.extend(ru_elite[:LIMIT_RU])
+    
+    # Берем 20 DE
+    random.shuffle(de_elite)
+    final_elite.extend(de_elite[:LIMIT_DE])
+    
+    # Если РФ или DE не хватает, добирать ничего не будем (строгость)
+    
+    # Перемешаем, чтобы не шли подряд
+    random.shuffle(final_elite)
+    
+    # Сохраняем элитную
+    content_elite = "\n".join(final_elite)
+    with open("best_ru_de.txt", "w", encoding="utf-8") as f:
+        f.write(content_elite)
+    with open("best_ru_de_base64.txt", "w", encoding="utf-8") as f:
+        f.write(base64.b64encode(content_elite.encode("utf-8")).decode("utf-8"))
         
-    print(f"Готово! В подписке: {len(final_list)} серверов (из них РФ попытка: {LIMIT_RU})")
+    print(f"Элитная подписка готова: {len(final_elite)} шт.")
+    print("\n=== Все готово! ===")
 
 if __name__ == "__main__":
     main()

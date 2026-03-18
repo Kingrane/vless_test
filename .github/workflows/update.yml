@@ -27,6 +27,5 @@ jobs:
       - name: Commit changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Auto update aggregated VLESS list"
           commit_message: "Auto update VLESS configs"
           file_pattern: aggregated.txt aggregated_base64.txt best_ru_de.txt best_ru_de_base64.txt

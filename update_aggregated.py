@@ -1,22 +1,22 @@
 import base64
 import random
-import re
 from urllib.request import urlopen, Request
 from urllib.parse import unquote
 
 # --- НАСТРОЙКИ ---
-# Источники для ОСНОВНОЙ подписки (aggregated.txt)
-SOURCES_MAIN = [
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-checked.txt",
-    "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt",
-    "https://nowmeow.pw/8ybBd3fdCAQ6Ew5H0d66Y1hMbh63GpKUtEXQClIu/whitelist?ru=10&other=40"
-]
 
-# Источник для ЭЛИТНОЙ подписки (best_ru_de.txt)
-SOURCE_ELITE = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-checked.txt"
+# 1. Источники
+URL_ELITE = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-checked.txt"
+URL_COMMON = "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt"
 
-LIMIT_RU = 30
-LIMIT_DE = 20
+# 2. Лимиты для Elite файла (best_ru_de.txt)
+LIMIT_VK_ANYCAST = 10  # Сколько берем "самых живых" (VK/Anycast)
+LIMIT_RU_SIMPLE = 25   # Сколько берем обычной России
+LIMIT_DE = 15          # Сколько берем Германии
+TOTAL_ELITE_LIMIT = LIMIT_VK_ANYCAST + LIMIT_RU_SIMPLE + LIMIT_DE
+
+# Лимит для Common файла (aggregated.txt)
+LIMIT_COMMON = 50
 
 def fetch_text(url: str) -> str:
     req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -27,12 +27,22 @@ def fetch_text(url: str) -> str:
         print(f"Error fetching {url}: {e}")
         return ""
 
+def get_score(line: str) -> int:
+    """Оценка качества: VK/Anycast получают +100 очков."""
+    try:
+        remark = unquote(line.split("#")[-1]).lower()
+        if any(x in remark for x in ["vk", "yandex", "anycast"]):
+            return 100
+        return 0
+    except:
+        return -100
+
 def detect_country(line: str) -> str:
+    """Определяет страну по флагу или тексту."""
     try:
         if "#" not in line: return "other"
-        remark = line.split("#")[-1]
-        remark = unquote(remark).lower()
-
+        remark = unquote(line.split("#")[-1]).lower()
+        
         # РФ
         if "🇷🇺" in remark or "russia" in remark or "ru_" in remark or "rf" in remark:
             return "ru"
@@ -45,85 +55,88 @@ def detect_country(line: str) -> str:
     except:
         return "other"
 
-def process_sources(url_list):
-    """Собирает все ключи из списка URL, сортирует по странам"""
-    pool_ru = []
-    pool_de = []
-    pool_other = []
-    
-    for url in url_list:
-        text = fetch_text(url)
-        lines = [l.strip() for l in text.splitlines() if l.strip().startswith("vless://")]
-        
-        for line in lines:
-            country = detect_country(line)
-            if country == "ru":
-                pool_ru.append(line)
-            elif country == "de":
-                pool_de.append(line)
-            else:
-                pool_other.append(line)
-                
-    # Дедупликация
-    return list(dict.fromkeys(pool_ru)), list(dict.fromkeys(pool_de)), list(dict.fromkeys(pool_other))
+def save_file(filename_base, content_list):
+    plain = "\n".join(content_list)
+    with open(f"{filename_base}.txt", "w", encoding="utf-8") as f:
+        f.write(plain)
+    with open(f"{filename_base}_base64.txt", "w", encoding="utf-8") as f:
+        f.write(base64.b64encode(plain.encode("utf-8")).decode("utf-8"))
 
 def main():
-    print("=== Запуск генератора подписок ===")
+    print("=== Запуск Аккуратного Сборщика ===")
     
-    # --- 1. ГЕНЕРАЦИЯ ОСНОВНОЙ ПОДПИСКИ (aggregated.txt) ---
-    # Логика: 35 РФ + 15 Мир (как мы обсуждали ранее, но теперь ищем RU/DE глобально)
-    print("\n[1/2] Генерация основной подписки...")
-    ru_main, de_main, other_main = process_sources(SOURCES_MAIN)
-    
-    final_main = []
-    random.shuffle(ru_main)
-    final_main.extend(ru_main[:35]) # Берем 35 РФ
-    
-    # Добираем из Германии и прочих
-    rest_pool = de_main + other_main
-    random.shuffle(rest_pool)
-    final_main.extend(rest_pool[:15]) # Берем 15 "Мир"
-    
-    random.shuffle(final_main)
-    
-    # Сохраняем основную
-    with open("aggregated.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(final_main))
-    with open("aggregated_base64.txt", "w", encoding="utf-8") as f:
-        f.write(base64.b64encode("\n".join(final_main).encode("utf-8")).decode("utf-8"))
-    print(f"Основная подписка готова: {len(final_main)} шт.")
+    # ==========================================
+    # ФАЙЛ 1: best_ru_de.txt (ЭЛИТА)
+    # ==========================================
+    print("\n[1] Генерация best_ru_de.txt (Элита)")
+    text_elite = fetch_text(URL_ELITE)
+    lines_elite = [l.strip() for l in text_elite.splitlines() if l.strip().startswith("vless://")]
 
-    # --- 2. ГЕНЕРАЦИЯ ЭЛИТНОЙ ПОДПИСКИ (best_ru_de.txt) ---
-    # Логика: Четко 30 РФ + 20 DE только из WHITE-CIDR-RU-checked
-    print("\n[2/2] Генерация элитной подписки (RU+DE)...")
-    ru_elite, de_elite, _ = process_sources([SOURCE_ELITE])
+    # Классификация
+    pool_vk_anycast = []
+    pool_ru_simple = []
+    pool_de = []
+
+    for line in lines_elite:
+        country = detect_country(line)
+        score = get_score(line)
+        
+        # Сначала разбираем элиту (VK/Anycast), считаем их РФ
+        if score == 100:
+            pool_vk_anycast.append(line)
+        elif country == "ru":
+            pool_ru_simple.append(line)
+        elif country == "de":
+            pool_de.append(line)
+
+    # Сортировка и отбор
+    # VK/Anycast сортируем по принципу "как есть", просто берем сколько нужно
+    # Если их меньше лимита - возьмем всех
+    random.shuffle(pool_vk_anycast)
+    selected_vk = pool_vk_anycast[:LIMIT_VK_ANYCAST]
+
+    # Обычная РФ
+    random.shuffle(pool_ru_simple)
+    selected_ru = pool_ru_simple[:LIMIT_RU_SIMPLE]
+
+    # Германия
+    random.shuffle(pool_de)
+    selected_de = pool_de[:LIMIT_DE]
+
+    # Сборка итога
+    final_elite = selected_vk + selected_ru + selected_de
     
-    print(f"Найдено в Elite источнике: РФ={len(ru_elite)}, DE={len(de_elite)}")
+    # Если VK/Anycast было мало, добираем обычной РФ
+    if len(selected_vk) < LIMIT_VK_ANYCAST:
+        shortage = LIMIT_VK_ANYCAST - len(selected_vk)
+        # Берем дополнительно из pool_ru_simple, но те, которых еще нет в списке
+        extras = [x for x in pool_ru_simple if x not in final_elite][:shortage]
+        final_elite.extend(extras)
+
+    # Если DE мало, добирать не будем (строгость)
     
-    final_elite = []
-    
-    # Берем 30 РФ
-    random.shuffle(ru_elite)
-    final_elite.extend(ru_elite[:LIMIT_RU])
-    
-    # Берем 20 DE
-    random.shuffle(de_elite)
-    final_elite.extend(de_elite[:LIMIT_DE])
-    
-    # Если РФ или DE не хватает, добирать ничего не будем (строгость)
-    
-    # Перемешаем, чтобы не шли подряд
     random.shuffle(final_elite)
     
-    # Сохраняем элитную
-    content_elite = "\n".join(final_elite)
-    with open("best_ru_de.txt", "w", encoding="utf-8") as f:
-        f.write(content_elite)
-    with open("best_ru_de_base64.txt", "w", encoding="utf-8") as f:
-        f.write(base64.b64encode(content_elite.encode("utf-8")).decode("utf-8"))
-        
-    print(f"Элитная подписка готова: {len(final_elite)} шт.")
-    print("\n=== Все готово! ===")
+    # Если всего набралось меньше лимита (например, DE нет), предупреждаем
+    if len(final_elite) < TOTAL_ELITE_LIMIT:
+        print(f"Внимание! Набрано меньше лимита: {len(final_elite)} из {TOTAL_ELITE_LIMIT}")
+
+    save_file("best_ru_de", final_elite)
+    print(f"Готово: VK/Any:{len(selected_vk)}, RU:{len(selected_ru)}, DE:{len(selected_de)} | Всего: {len(final_elite)}")
+
+    # ==========================================
+    # ФАЙЛ 2: aggregated.txt (МАССОВКА)
+    # ==========================================
+    print("\n[2] Генерация aggregated.txt (Массовка)")
+    text_common = fetch_text(URL_COMMON)
+    lines_common = [l.strip() for l in text_common.splitlines() if l.strip().startswith("vless://")]
+    
+    # Просто мешаем и берем 50 штук
+    random.shuffle(lines_common)
+    final_common = lines_common[:LIMIT_COMMON]
+    
+    save_file("aggregated", final_common)
+    print(f"Готово: {len(final_common)} серверов из vless_lite.")
 
 if __name__ == "__main__":
     main()

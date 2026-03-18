@@ -3,7 +3,7 @@ name: Update aggregated VLESS list
 
 on:
   schedule:
-    - cron: "0 * * * *"  # каждый час
+    - cron: "0 8,20 * * *"
   workflow_dispatch:      # ручной запуск
 
 jobs:

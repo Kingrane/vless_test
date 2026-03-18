@@ -1,26 +1,25 @@
 import base64
 import random
-import os
+import re
 from urllib.request import urlopen, Request
-import urllib.error
+from urllib.parse import unquote
 
 # --- НАСТРОЙКИ ---
-# Список источников. nowmeow настроен на приоритет РФ.
+# Источники расставлены по приоритету
 SOURCES = [
-    # 1. Проверенный список (белые списки)
+    # 1. Самый качественный (белые списки,Checked). Дает ~58% живых.
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/WHITE-CIDR-RU-checked.txt",
     
-    # 2. Лайт версия zieng2 (там 109 рабочих из 1100, берем легкую версию, меньше мусора)
+    # 2. Лайт версия (zieng2). Дает ~8% живых.
     "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt",
     
-    # 3. API nowmeow: запрашиваем 20 РФ и 10 Мира (всего 30).
-    # Это даст нам стабильное ядро из РФ серверов.
+    # 3. API (для разнообразия)
     "https://nowmeow.pw/8ybBd3fdCAQ6Ew5H0d66Y1hMbh63GpKUtEXQClIu/whitelist?ru=20&other=10"
 ]
 
-LIMIT_TOTAL = 50
-# Ссылка на текущий файл в твоем репозитории (чтобы скачать старый список)
-REPO_RAW_URL = "https://raw.githubusercontent.com/Kingrane/vless_agregator/main/aggregated.txt"
+LIMIT_RU = 35       # Сколько хотим РФ серверов
+LIMIT_OTHER = 15    # Сколько хотим иностранных
+LIMIT_TOTAL = LIMIT_RU + LIMIT_OTHER
 
 def fetch_text(url: str) -> str:
     req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -31,73 +30,81 @@ def fetch_text(url: str) -> str:
         print(f"Error fetching {url}: {e}")
         return ""
 
-def parse_vless_lines(text: str) -> list[str]:
-    lines = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("vless://"):
-            lines.append(line)
-    return lines
+def detect_country(line: str) -> str:
+    """
+    Пытается понять страну по комментарию в конце строки.
+    Обычно формат: vless://...#Country Name или vless://...#🇷🇺 Country
+    """
+    try:
+        # Берем часть после решетки
+        if "#" not in line: return "unknown"
+        remark = line.split("#")[-1]
+        remark = unquote(remark).lower()
+
+        # Список ключевых слов для РФ
+        ru_keys = ["russia", "ru_", "rf", "москва", "moscow", "🇷🇺"]
+        
+        # Проверяем РФ
+        for key in ru_keys:
+            if key in remark:
+                return "ru"
+        
+        # Если это точно не РФ, считаем "other"
+        return "other"
+    except:
+        return "unknown"
 
 def main():
-    print("--- Запуск умного агрегатора ---")
+    print("--- Запуск гео-агрегатора ---")
     
-    # 1. Скачиваем старый список (если есть), чтобы сохранить рабочие сервера
-    old_configs = []
-    print("Попытка скачать предыдущий список...")
-    old_text = fetch_text(REPO_RAW_URL)
-    if old_text:
-        old_configs = parse_vless_lines(old_text)
-        print(f"Найдено старых конфигов: {len(old_configs)}")
-    else:
-        print("Предыдущий список пуст или не найден.")
-
-    # 2. Скачиваем все свежие базы
-    fresh_pool = []
+    # Разделяем потоки
+    pool_ru = []
+    pool_other = []
+    
+    # Скачиваем и сортируем
     for url in SOURCES:
-        print(f"Загрузка: {url.split('/')[2]} ...")
         text = fetch_text(url)
-        if text:
-            fresh_pool.extend(parse_vless_lines(text))
+        lines = [l.strip() for l in text.splitlines() if l.strip().startswith("vless://")]
+        
+        # Разделяем по странам
+        for line in lines:
+            country = detect_country(line)
+            if country == "ru":
+                pool_ru.append(line)
+            else:
+                pool_other.append(line)
+
+    # Удаляем дубликаты внутри списков
+    pool_ru = list(dict.fromkeys(pool_ru))
+    pool_other = list(dict.fromkeys(pool_other))
     
-    # Удаляем дубликаты из свежего пула
-    fresh_pool = list(dict.fromkeys(fresh_pool))
-    print(f"Всего уникальных ключей в свежих базах: {len(fresh_pool)}")
+    print(f"Найдено в базах: РФ={len(pool_ru)}, Других={len(pool_other)}")
 
-    if not fresh_pool:
-        print("Критическая ошибка: свежие базы пусты.")
-        return
-
-    # 3. Формируем новый список (Smart Merge)
+    # --- ЛОГИКА ОТБОРА ---
     final_list = []
-    
-    # Логика "Старый друг лучше новых двух":
-    # Если сервер был в старом списке И он до сих пор есть в свежих базах -> Берем его.
-    # Это гарантирует, что мы не потеряем то, что уже работает.
-    for config in old_configs:
-        if config in fresh_pool:
-            final_list.append(config)
-    
-    print(f"Сохранено из старого списка: {len(final_list)}")
-    
-    # 4. Если места еще много, добавляем рандом из свежих
-    remaining_slots = LIMIT_TOTAL - len(final_list)
-    if remaining_slots > 0:
-        # Убираем из пула те, что мы уже взяли
-        candidates = [x for x in fresh_pool if x not in final_list]
-        
-        # Перемешиваем кандидатов
-        random.shuffle(candidates)
-        
-        # Берем сколько нужно
-        new_additions = candidates[:remaining_slots]
-        final_list.extend(new_additions)
-        print(f"Добавлено новых рандомных: {len(new_additions)}")
-    
-    # Если старых было больше лимита (маловерноятно, но бывает), обрезаем
-    final_list = final_list[:LIMIT_TOTAL]
 
-    # 5. Сохраняем файлы
+    # 1. Берем РФ. 
+    # Перемешиваем, чтобы каждый раз были разные, но из качественного пула.
+    random.shuffle(pool_ru)
+    
+    # Берем сколько просили (35)
+    final_list.extend(pool_ru[:LIMIT_RU])
+    
+    # 2. Добираем иностранные (15)
+    random.shuffle(pool_other)
+    final_list.extend(pool_other[:LIMIT_OTHER])
+
+    # Если РФ не хватило, добиваем иностранцами до 50
+    if len(final_list) < LIMIT_TOTAL:
+        needed = LIMIT_TOTAL - len(final_list)
+        # Берем остатки из других, которых еще нет в списке
+        leftovers = [x for x in pool_other if x not in final_list]
+        final_list.extend(leftovers[:needed])
+
+    # Финальная перемешка (чтобы не шли блоком РФ, потом блоком Мир)
+    random.shuffle(final_list)
+
+    # --- СОХРАНЕНИЕ ---
     plain_content = "\n".join(final_list)
     base64_content = base64.b64encode(plain_content.encode("utf-8")).decode("utf-8")
 
@@ -107,7 +114,7 @@ def main():
     with open("aggregated_base64.txt", "w", encoding="utf-8") as f:
         f.write(base64_content)
         
-    print(f"Готово! Итого в подписке: {len(final_list)} серверов.")
+    print(f"Готово! В подписке: {len(final_list)} серверов (из них РФ попытка: {LIMIT_RU})")
 
 if __name__ == "__main__":
     main()
